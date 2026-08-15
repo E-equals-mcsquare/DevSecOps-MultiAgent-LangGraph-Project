@@ -26,6 +26,9 @@ on:
 jobs:
   review:
     runs-on: self-hosted
+    # Safety net: a stuck self-hosted runner job would otherwise block the
+    # queue indefinitely, since nothing else times it out for you.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
