@@ -2,10 +2,16 @@ import asyncio
 import json
 import os
 from datetime import date, timedelta
+from pathlib import Path
 
+from langchain_anthropic import ChatAnthropic
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.prebuilt import create_react_agent
 
 COST_LOOKBACK_DAYS = 30
+TERRAFORM_DIR = Path(__file__).resolve().parent.parent / "infra" / "terraform"
+
+_pricing_llm = ChatAnthropic(model="claude-sonnet-4-5-20250929", temperature=0)
 
 
 def _mcp_env() -> dict:
@@ -66,6 +72,37 @@ def _summarize_recommendations(text: str) -> str:
     return "\n".join(lines)
 
 
+async def _estimate_deployment_cost(pricing_tool) -> str:
+    """Pre-deployment cost estimate — how much would *this PR's* Terraform resources
+    cost monthly, before anything is actually created. Unlike Cost Explorer/Cost
+    Optimization Hub above (real billing history, needs days of usage data), this is
+    a catalog lookup via AWS's Price List API, so it works instantly regardless of
+    what's actually deployed. Needs a real agentic tool-use loop, not a single
+    summarize_tool_output() call: the model has to decide which service, which
+    pricing attributes matter, and what filter values to use before it can call
+    get_pricing_from_api — that's what aws-pricing's own tool description says to do,
+    in that order (get_service_codes -> get_service_attributes -> get_attribute_values
+    -> get_pricing_from_api)."""
+    tf_text = "\n\n".join(
+        f"# {path.name}\n{path.read_text()}" for path in sorted(TERRAFORM_DIR.glob("*.tf"))
+    )
+    agent = create_react_agent(_pricing_llm, tools=[pricing_tool])
+    prompt = (
+        "Estimate the monthly AWS cost (region us-east-1, on-demand pricing) of deploying "
+        "the Terraform resources below. Use the aws-pricing tool in this order: "
+        "get_service_codes, then get_service_attributes, then get_attribute_values, then "
+        "get_pricing_from_api. Skip that lookup entirely for resources with no direct cost "
+        "(IAM policies, S3 public-access-block settings, data sources, etc). Give a short "
+        "per-resource line and a total estimated monthly cost. Be concise — a few sentences, "
+        "not a report. Your final reply must start directly with the estimate itself — no "
+        "conversational preamble like \"I have the information I need\" or \"let me calculate\".\n\n"
+        f"{tf_text}"
+    )
+    result = await agent.ainvoke({"messages": [{"role": "user", "content": prompt}]})
+    content = result["messages"][-1].content
+    return content if isinstance(content, str) else str(content)
+
+
 async def _mcp_cost_agent() -> dict:
     end = date.today()
     start = end - timedelta(days=COST_LOOKBACK_DAYS)
@@ -99,7 +136,14 @@ async def _mcp_cost_agent() -> dict:
     })
     rec_summary = _summarize_recommendations(_extract_text(rec_result))
 
-    return {"agent_results": [f"{usage_summary}\n{rec_summary}"]}
+    print("[cost_agent] estimating monthly cost of infra/terraform/*.tf via aws-pricing + Claude...")
+    try:
+        estimate = await _estimate_deployment_cost(tools["aws-pricing"])
+        pricing_summary = f"Pre-deployment cost estimate:\n{estimate}"
+    except Exception as e:
+        pricing_summary = f"Pre-deployment cost estimate: unavailable ({e})."
+
+    return {"agent_results": [f"{usage_summary}\n{rec_summary}\n\n{pricing_summary}"]}
 
 
 def cost_agent(state) -> dict:

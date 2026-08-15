@@ -46,7 +46,7 @@ human at a browser — see "GitHub Actions PR trigger (CI path)" below.
 | `temporal_workflow.py` | `DevSecOpsWorkflow` — drives `graph.py`'s graph through Temporal instead of `graph.astream()` directly; publishes live progress, exposes the pending interrupt via signal/query |
 | `temporal_worker.py` | Hosts `graph.py`'s nodes as Temporal Activities (retries, timeouts) |
 | `agents/` | One module per agent — `terraform_agent.py`, `security_agent.py`, `pipeline_agent.py`, `cost_agent.py`, `generic_agent.py` (fallback, no tool), `summary_agent.py` (`post_summary_node` — posts the review as a PR comment, CI path only). Unchanged by the Temporal integration — same functions run as plain Python calls (CLI) or Temporal Activities (web UI/CI) |
-| `infra/terraform/` | Sample Terraform (S3 bucket + an intentionally overly-permissive IAM policy) that `terraform_agent`/`security_agent` run against |
+| `infra/terraform/` | Sample Terraform — S3 bucket + an intentionally overly-permissive IAM policy (for `terraform_agent`/`security_agent`) + a `t3.micro` EC2 instance (gives `cost_agent`'s pricing estimate something with real cost weight to price out) |
 | `mock_data/sample_pr.json` | Stand-in for a real GitHub webhook payload for the CLI/web-UI paths — the CI path (below) reads a real PR instead |
 | `Dockerfile` | Image for hosting `temporal_worker.py` — `terraform`/`snyk`/`uvx` baked in, no secrets. See "Hosting the worker in Docker" below |
 | `ci_graph.py` | The CI graph: `graph.py`'s flow with the interrupt/auto-merge tail replaced by a single `post_summary` node — no human sits at a UI waiting on a signal |
@@ -94,11 +94,25 @@ Notes:
   JSON-encoded strings (`json.dumps([...])`), not plain lists — the tool's own examples
   are misleading here. Its Cost Explorer endpoint only works from `us-east-1`, regardless
   of which region your resources are in.
-- `cost_agent` reports real account-wide spend and optimization recommendations, not a
-  cost estimate of the specific PR's Terraform diff — Cost Explorer works on actual
-  billing history, not unapplied plans. Optimization recommendations require Cost
-  Optimization Hub to be enrolled for the account (Console → Cost Optimization Hub);
-  `cost_agent` reports that gap instead of failing when it isn't.
+- `cost_agent`'s account-wide spend and optimization recommendations are about *existing*
+  infrastructure — Cost Explorer works on actual billing history, and Cost Optimization
+  Hub's recommendations need real usage history to build confidence (AWS's own numbers:
+  1-3 days after first enabling it, up to 14 days of data for idle-resource detection) —
+  neither can say anything about resources that don't exist yet. `cost_agent` reports the
+  Cost Optimization Hub gap instead of failing when it isn't enrolled.
+- **Pre-deployment cost estimate** (`_estimate_deployment_cost` in `agents/cost_agent.py`)
+  is the one part of `cost_agent` that *can* speak to what this PR is about to create —
+  it's a live AWS Price List API lookup (the `aws-pricing` tool on the same MCP server),
+  not a usage-history question, so it works instantly regardless of what's actually
+  deployed. This needed a real agentic tool-use loop rather than the one-shot
+  `summarize_tool_output()` pattern every other agent uses: Claude has to decide which
+  AWS service, which pricing attributes matter, and what filter values to use before it
+  can get an actual price — `langgraph.prebuilt.create_react_agent` bound to the
+  `aws-pricing` tool, given the raw `infra/terraform/*.tf` text, driving AWS's own
+  suggested lookup order (`get_service_codes` → `get_service_attributes` →
+  `get_attribute_values` → `get_pricing_from_api`) on its own. Verified live: correctly
+  prices the `t3.micro` instance (~$7.59/mo) and correctly treats the IAM policy and S3
+  public-access-block resource as free, without being told which is which.
 - `cost_agent` runs alongside `terraform_agent` (routed on `.tf` changes) since cost
   impact is naturally tied to infra changes.
 
