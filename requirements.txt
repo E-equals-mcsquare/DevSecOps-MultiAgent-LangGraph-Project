@@ -5,7 +5,5 @@ python-dotenv>=1.0
 httpx[socks]>=0.27
 langchain-mcp-adapters>=0.3
 mcp>=1.0
-fastapi>=0.115
-uvicorn>=0.32
 temporalio[langgraph]>=1.27
 pyright>=1.1

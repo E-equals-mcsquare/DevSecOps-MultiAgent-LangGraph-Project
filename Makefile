@@ -1,17 +1,15 @@
 VENV       := .venv
 PYTHON     := $(VENV)/bin/python3
 PIP        := $(VENV)/bin/pip
-UVICORN    := $(VENV)/bin/uvicorn
 PYRIGHT    := $(VENV)/bin/pyright
 
-.PHONY: help install cli temporal worker web check clean docker-build docker-run
+.PHONY: help install cli temporal worker check clean docker-build docker-run
 
 help:
 	@echo "make install      - create .venv, install deps, copy .env.example -> .env"
 	@echo "make cli          - run the CLI review (main.py, no Temporal)"
-	@echo "make temporal     - start the local Temporal dev server (terminal 1 for the web UI)"
+	@echo "make temporal     - start the local Temporal dev server (terminal 1 for the CI path)"
 	@echo "make worker       - start the Temporal worker              (terminal 2)"
-	@echo "make web          - start the web UI                       (terminal 3)"
 	@echo "make check        - run pyright across the project"
 	@echo "make clean        - remove __pycache__/*.pyc"
 	@echo "make docker-build - build temporal_worker.py's image (terraform+snyk+uv baked in)"
@@ -33,11 +31,8 @@ temporal:
 worker:
 	$(PYTHON) temporal_worker.py
 
-web:
-	$(UVICORN) web.server:app --reload
-
 check:
-	$(PYRIGHT) graph.py main.py temporal_workflow.py temporal_worker.py web/server.py agents/ ci_graph.py ci_workflow.py trigger_workflow.py
+	$(PYRIGHT) graph.py main.py temporal_worker.py agents/ ci_graph.py ci_workflow.py trigger_workflow.py
 
 clean:
 	find . -name '__pycache__' -type d -exec rm -rf {} +

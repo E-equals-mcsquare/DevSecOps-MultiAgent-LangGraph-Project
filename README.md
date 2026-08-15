@@ -2,7 +2,7 @@
 
 An agentic PR review pipeline built on LangGraph + Claude: an orchestrator routes
 a changed-files list to the relevant agents, which run real tools (Terraform,
-Checkov, GitHub Actions) in parallel; Claude synthesizes their findings into a
+Snyk, GitHub Actions, AWS) in parallel; Claude synthesizes their findings into a
 root cause / risk level / recommendations review; low-risk PRs auto-merge,
 everything else pauses for human approval.
 
@@ -20,37 +20,22 @@ Run it as a CLI:
 python3 main.py
 ```
 
-Or run the web UI — same graph, but durably: each agent runs as a retryable
-Temporal Activity, progress streams live, and the human-approval pause
-survives a worker restart instead of only living in one process's memory.
-Needs three processes, each in its own terminal:
-
-```bash
-temporal server start-dev          # local Temporal server + UI at localhost:8233
-python3 temporal_worker.py         # hosts the graph's activities
-uvicorn web.server:app --reload    # the UI itself
-```
-
-Then open http://127.0.0.1:8000 and click **Run Review**.
-
-There's a third way to run this: a real PR triggers it via GitHub Actions, no
-human at a browser — see "GitHub Actions PR trigger (CI path)" below.
+There's a second way to run this: a real PR triggers it via GitHub Actions, no
+human at a terminal at all — see "GitHub Actions PR trigger (CI path)" below.
 
 ## Structure
 
 | Path | What it is |
 |---|---|
 | `main.py` | CLI entry point — loads the PR, runs the graph directly (no Temporal), formats/prints the PR review comment, handles the human-approval pause/resume loop via `input()` |
-| `web/` | Local web UI — `server.py` (FastAPI, a Temporal client: starts the workflow, streams its progress over SSE, signals it for the interrupt) + `static/` (vanilla HTML/CSS/JS, no build step) |
-| `graph.py` | The LangGraph itself: state, orchestrator, conditional fan-out/fan-in to agents, Claude synthesis node, risk-based routing, `interrupt()`-based human approval. Every node is tagged `metadata={"execute_in": "activity"}`, read only by Temporal — plain LangGraph (`main.py`) ignores it |
-| `temporal_workflow.py` | `DevSecOpsWorkflow` — drives `graph.py`'s graph through Temporal instead of `graph.astream()` directly; publishes live progress, exposes the pending interrupt via signal/query |
-| `temporal_worker.py` | Hosts `graph.py`'s nodes as Temporal Activities (retries, timeouts) |
-| `agents/` | One module per agent — `terraform_agent.py`, `security_agent.py`, `pipeline_agent.py`, `cost_agent.py`, `generic_agent.py` (fallback, no tool), `summary_agent.py` (`post_summary_node` — posts the review as a PR comment, CI path only). Unchanged by the Temporal integration — same functions run as plain Python calls (CLI) or Temporal Activities (web UI/CI) |
+| `graph.py` | The LangGraph itself: state, orchestrator, conditional fan-out/fan-in to agents, Claude synthesis node, risk-based routing, `interrupt()`-based human approval. Used directly by `main.py` — plain LangGraph, no Temporal. Also the source of the node functions/state `ci_graph.py` reuses for the CI path |
+| `temporal_worker.py` | Hosts `ci_graph.py`'s nodes as Temporal Activities (retries, timeouts) — the CI path only; `main.py`'s graph never goes through Temporal |
+| `agents/` | One module per agent — `terraform_agent.py`, `security_agent.py`, `pipeline_agent.py`, `cost_agent.py`, `generic_agent.py` (fallback, no tool), `summary_agent.py` (`post_summary_node` — posts the review as a PR comment, CI path only). Unchanged by the Temporal integration — same functions run as plain Python calls (CLI) or Temporal Activities (CI) |
 | `infra/terraform/` | Sample Terraform — S3 bucket + an intentionally overly-permissive IAM policy (for `terraform_agent`/`security_agent`) + a `t3.micro` EC2 instance (gives `cost_agent`'s pricing estimate something with real cost weight to price out) |
-| `mock_data/sample_pr.json` | Stand-in for a real GitHub webhook payload for the CLI/web-UI paths — the CI path (below) reads a real PR instead |
+| `mock_data/sample_pr.json` | Stand-in for a real GitHub webhook payload for the CLI path — the CI path (below) reads a real PR instead |
 | `Dockerfile` | Image for hosting `temporal_worker.py` — `terraform`/`snyk`/`uvx` baked in, no secrets. See "Hosting the worker in Docker" below |
-| `ci_graph.py` | The CI graph: `graph.py`'s flow with the interrupt/auto-merge tail replaced by a single `post_summary` node — no human sits at a UI waiting on a signal |
-| `ci_workflow.py` | `PRReviewWorkflow` — the CI path's Temporal Workflow. Simpler than `DevSecOpsWorkflow`: no signals/queries/stream, since `ci_graph.py` never interrupts |
+| `ci_graph.py` | The CI graph: reuses `graph.py`'s orchestrator/agents/synthesis nodes, but ends at a single `post_summary` node instead of risk-routing to auto-merge/human-approval — no human sits at a UI waiting on a signal |
+| `ci_workflow.py` | `PRReviewWorkflow` — the CI path's Temporal Workflow. No signals/queries/stream, since `ci_graph.py` never interrupts |
 | `trigger_workflow.py` | Run as a GitHub Actions step: reads the triggering PR from the Actions event payload, connects to Temporal (local dev server by default, same as `temporal_worker.py`), starts `PRReviewWorkflow`, waits for it, writes the result to the job summary |
 | `.github/workflows/pr-review.yml` | Triggers `trigger_workflow.py` on every `pull_request` event; runs on a self-hosted runner (registered on your own machine) so it can reach a local Temporal server — no cloud account, no credentials stored in GitHub at all |
 
@@ -167,7 +152,7 @@ Notes:
 
 ## Hosting the worker in Docker
 
-`temporal_worker.py` (not the CLI or web UI — see `.dockerignore`) runs from a
+`temporal_worker.py` (not `main.py`'s CLI path — see `.dockerignore`) runs from a
 single-purpose image: Python 3.13-slim + `terraform`, `snyk` (standalone binary,
 no Node/npm), and `uvx` baked in — everything `terraform_agent`'s *local* fallback,
 `security_agent`, and `cost_agent`'s MCP integration need.
@@ -210,17 +195,16 @@ Notes, all confirmed by actually building/running the image, not just written do
 
 ## Durable execution with Temporal
 
-The web UI runs `graph.py`'s graph through Temporal
+The CI path (below) runs `ci_graph.py` through Temporal
 ([`temporalio[langgraph]`](https://docs.temporal.io/develop/python/integrations/langgraph))
 instead of calling `graph.astream()` directly. `main.py`'s CLI path is untouched —
-same graph, same node functions, no Temporal involved. Two problems this actually
-solves here, not just architecture for its own sake:
+plain LangGraph, no Temporal involved, same node functions. Two problems Temporal
+actually solves here, not just architecture for its own sake:
 
-- **The human-approval pause is durable.** Before, it only survived as long as the
-  Python process did (`MemorySaver` is in-memory). Now it's Temporal workflow state —
-  kill and restart `temporal_worker.py` mid-approval and the pending decision is
-  still there, because `human_approval_node`'s `interrupt()` resumes via a
-  `submit_decision` signal, not an in-process call.
+- **The whole run survives a worker crash or restart.** Temporal tracks workflow
+  progress as durable history, not in-process state — kill and restart
+  `temporal_worker.py` mid-run and it resumes from wherever it left off instead of
+  starting over.
 - **Flaky external calls get retried automatically.** Every agent (Docker/npx
   cold-starts, HCP Terraform polling, GitHub/Snyk/AWS MCP calls) runs as a Temporal
   Activity with `default_activity_options` in `temporal_worker.py` (150s timeout,
@@ -228,45 +212,36 @@ solves here, not just architecture for its own sake:
   immediately, the way it did calling these functions directly.
 
 What actually changed to make this work:
-- `determine_agents`/`route_by_risk` (the conditional-edge routers) became `async
-  def` — Temporal requires routers to run inline in the workflow and be async. This
-  in turn required `main.py` to switch from `graph.invoke()` to `await
-  graph.ainvoke()`: LangGraph's sync `.invoke()` cannot call an async router at all
-  (`TypeError: No synchronous function provided`), so the CLI path had to become
-  async too, even though it uses no Temporal itself.
-- Every other node function — all of `agents/*.py` plus `graph.py`'s own
-  `synthesis_node`/`human_approval_node`/etc. — needed **no changes**. They're all
+- `determine_agents` (the conditional-edge router `ci_graph.py` reuses from
+  `graph.py`) is `async def` — Temporal requires routers to run inline in the
+  workflow and be async. This in turn required `main.py` to switch from
+  `graph.invoke()` to `await graph.ainvoke()`: LangGraph's sync `.invoke()` cannot
+  call an async router at all (`TypeError: No synchronous function provided`), so
+  the CLI path had to become async too, even though it uses no Temporal itself.
+- Every node function — all of `agents/*.py` plus `graph.py`'s
+  `orchestrator_node`/`synthesis_node` and `agents/summary_agent.py`'s
+  `post_summary_node` — needed **no changes** to run as Activities. They're all
   plain sync `def`s (some internally calling `asyncio.run(...)`, e.g.
   `terraform_agent`), and Temporal's plugin runs sync nodes via
   `asyncio.to_thread(...)`, not inline in the Activity's own event loop — so a node
   that does its own `asyncio.run()` doesn't collide with one already running.
-- `temporal_workflow.py` deliberately does not import anything from `graph.py`.
-  Temporal's sandboxed workflow runner validates a workflow module's entire import
-  chain for determinism, and `graph.py` pulls in `httpx` (via `agents/*`), which
-  trips the sandbox's `urllib.request` restriction. The graph's registration name
-  (`"devsecops"`) is duplicated as a plain string in both `temporal_workflow.py` and
-  `temporal_worker.py` rather than shared via import.
-- A raw `langgraph.types.Interrupt` object can't cross the wire to the browser as-is
-  (Temporal's payload converter needs it serializable), so `temporal_workflow.py`
-  unwraps it to a plain `{"interrupt": {...the actual dict...}}` before publishing.
+- `ci_workflow.py` deliberately does not import anything from `graph.py` or
+  `ci_graph.py`. Temporal's sandboxed workflow runner validates a workflow module's
+  entire import chain for determinism, and both of those pull in `httpx` (via
+  `agents/*`), which trips the sandbox's `urllib.request` restriction. The graph's
+  registration name (`"devsecops-ci"`) is duplicated as a plain string in
+  `ci_workflow.py` and `temporal_worker.py` rather than shared via import.
 - An activity that exhausts its retries (e.g. `synthesis_node` failing without
-  `ANTHROPIC_API_KEY`) fails the whole Temporal workflow, not just that call — by
-  default that exception would propagate silently past the client with no message.
-  `temporal_workflow.py` publishes an `{"error": ...}` chunk before letting the
-  workflow fail for real, so the UI still shows a clean error banner (Temporal's own
-  history still correctly shows the run as `Failed`, which is useful to keep for
-  real bugs — see it at localhost:8233).
-- Resuming after approval re-subscribes to the same workflow's stream rather than
-  replaying it from the start (which would re-render every earlier agent card and,
-  worse, re-show the just-submitted approval prompt): the `interrupt` SSE event
-  carries the stream's current `offset`, the frontend hands it back on `/api/approve`,
-  and the server resumes from `offset + 1`.
+  `ANTHROPIC_API_KEY`) fails the whole Temporal workflow — Temporal's own history
+  correctly shows the run as `Failed` (see it at localhost:8233), and
+  `trigger_workflow.py` catches `WorkflowFailureError` on the GitHub Actions side
+  and reports it clearly instead of the job just silently failing.
 
 ## GitHub Actions PR trigger (CI path)
 
-A third way to run the review, alongside the CLI and the web UI: a real PR
-triggers it, with no human at a browser — and entirely locally, no cloud
-account of any kind required.
+A second way to run the review, alongside the CLI: a real PR triggers it, with
+no human watching at all — and entirely locally, no cloud account of any kind
+required.
 
 ```
 PR opened/updated
@@ -277,18 +252,19 @@ PR opened/updated
      a PR comment via the GitHub MCP)
 ```
 
-This reuses every agent unchanged — same `agents/*.py` functions, same
-Temporal-Activity durability/retry story as the web UI. What's different is
-the tail: `ci_graph.py` drops `route_by_risk`/`auto_merge`/`human_approval`
-entirely (see its docstring) and ends at `post_summary_node` instead — there's
-no live UI for a human to approve/reject from, so a human just reviews and
+This reuses every agent unchanged — same `agents/*.py` functions used by the
+CLI path, just running as Temporal Activities instead of plain calls. What's
+different is the tail: `ci_graph.py` drops `route_by_risk`/`auto_merge`/
+`human_approval` entirely (see its docstring) and ends at `post_summary_node`
+instead — there's no human at a terminal to approve/reject from, so a human
+just reviews and
 merges normally via GitHub's own PR UI, informed by the posted comment.
 
-**Why a separate graph/workflow instead of reusing `graph.py`/`DevSecOpsWorkflow`:**
+**Why a separate graph/workflow instead of reusing `graph.py`'s risk-routing tail:**
 an `interrupt()` with nothing subscribed to signal it back would leave the
-workflow paused forever. `ci_graph.py`/`ci_workflow.py` are a deliberately
-simpler pair for a path that never pauses; `graph.py`/`temporal_workflow.py`
-are untouched.
+workflow paused forever — there's no browser, no terminal, nothing watching in
+this path. `ci_graph.py`/`ci_workflow.py` are a deliberately simpler pair for a
+path that never pauses; `graph.py`'s own `graph` (used by `main.py`) is untouched.
 
 **Why a self-hosted runner, not a GitHub-hosted one:** GitHub-hosted runners
 are ephemeral cloud VMs — they can't reach a Temporal server on your laptop, or
@@ -311,10 +287,9 @@ One-time setup, from your repo's GitHub page:
    ./config.sh --url https://github.com/<owner>/<repo> --token <REGISTRATION_TOKEN>
    ./run.sh
    ```
-3. Leave `./run.sh` running in its own terminal (terminal 4, alongside
-   `temporal server start-dev`, `temporal_worker.py`, and the web UI if you're
-   running that too) — that's the process GitHub Actions dispatches the
-   `runs-on: self-hosted` job to.
+3. Leave `./run.sh` running in its own terminal (alongside `temporal server
+   start-dev` and `temporal_worker.py`) — that's the process GitHub Actions
+   dispatches the `runs-on: self-hosted` job to.
 
 That's the whole setup. No IAM roles, no secrets, no cloud account — opening a
 real PR against this repo now runs the full pipeline on your own machine.
@@ -323,7 +298,7 @@ real PR against this repo now runs the full pipeline on your own machine.
 
 | Diagram box | This project |
 |---|---|
-| Developer creates PR / PR triggers pipeline | CLI/web UI: `mock_data/sample_pr.json` + `load_pr()`. **CI path: real** — `.github/workflows/pr-review.yml` on `pull_request`, see above |
+| Developer creates PR / PR triggers pipeline | CLI: `mock_data/sample_pr.json` + `load_pr()`. **CI path: real** — `.github/workflows/pr-review.yml` on `pull_request`, see above |
 | Agentic AI Orchestrator reads PR, detects changed files | `orchestrator_node` in `graph.py` (shared by `ci_graph.py`) |
 | Orchestrator selects relevant Agents | `determine_agents` conditional router |
 | Agents run tools in parallel, collect results | `agents/` package — all four via real MCP servers (see below), most with a local/direct-API fallback |
@@ -331,7 +306,7 @@ real PR against this repo now runs the full pipeline on your own machine.
 | LLM generates Root Cause, Risks, Recommendations | `ReviewOutput` structured output |
 | AI posts Review in Pull Request | CLI: `format_pr_comment()` in `main.py` (prints only). **CI path: real** — `post_summary_node` in `agents/summary_agent.py` posts via the GitHub MCP's `add_issue_comment` |
 | Risk Classification: Low/Medium/High/Critical | `route_by_risk` (currently binary: low vs. everything else — easy to extend to 4 branches). CI path skips routing/blocking entirely — see above |
-| Human Approval / Auto Merge | CLI/web UI: `interrupt()` + `Command(resume=...)` — durable across a worker restart when run via Temporal. CI path: no blocking gate — a human reviews/merges via GitHub's own PR UI, informed by the posted comment |
+| Human Approval / Auto Merge | CLI: `interrupt()` + `Command(resume=...)`, resolved via a terminal `input()` prompt — in-process only, not durable. CI path: no blocking gate at all — a human reviews/merges via GitHub's own PR UI, informed by the posted comment |
 | After Approval -> CI/CD -> Production | out of scope here; would be a real pipeline trigger after `final_decision` |
 
 ## Next steps toward the full diagram
@@ -345,7 +320,7 @@ Roughly in order of effort:
    a local Chroma/FAISS index before paying for Azure AI Search.
 3. **4-way risk routing.** Extend `route_by_risk` to return `auto_merge`,
    `team_lead_approval`, `security_approval`, or `cab_approval` per the diagram, each
-   a separate `interrupt()`-based node with different approvers (web UI path only —
+   a separate `interrupt()`-based node with different approvers (CLI path only —
    see "GitHub Actions PR trigger" above for why the CI path deliberately skips this).
 4. **Move off `temporal server start-dev` for anything beyond a demo.** It's
    SQLite-backed, single-process, no auth — fine for local dev/recording, but a real
@@ -363,4 +338,3 @@ self-hosted runner — no cloud account required for any of it).
 - Human-in-the-loop guide: https://langchain-ai.github.io/langgraph/how-tos/human_in_the_loop/
 - `langchain-anthropic` structured output: https://python.langchain.com/docs/integrations/chat/anthropic/
 - Temporal's LangGraph integration: https://docs.temporal.io/develop/python/integrations/langgraph
-- Reference samples this project's Temporal code follows: [`langgraph_plugin/graph_api/human_in_the_loop`](https://github.com/temporalio/samples-python/tree/main/langgraph_plugin/graph_api/human_in_the_loop) (signals/queries for `interrupt()`), [`langgraph_plugin/graph_api/streaming`](https://github.com/temporalio/samples-python/tree/main/langgraph_plugin/graph_api/streaming) (Workflow Streams)

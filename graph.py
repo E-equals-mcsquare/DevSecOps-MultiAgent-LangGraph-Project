@@ -11,27 +11,18 @@ Flow:
   3. synthesis_node sends the combined findings to Claude for a structured
      root cause / risk level / recommendations review.
   4. route_by_risk sends low-risk PRs to auto_merge_node; anything else
-     pauses at human_approval_node via interrupt() until a human (or CI
-     bot) calls graph.invoke(Command(resume=decision), ...).
+     pauses at human_approval_node via interrupt() until a human calls
+     graph.ainvoke(Command(resume=decision), ...).
 
-Every node below is tagged metadata={"execute_in": "activity"}. Plain
-LangGraph (main.py's CLI path) ignores that metadata entirely — it's only
-read by temporalio's LangGraphPlugin (see temporal_worker.py), which runs
-each node as a durable, retryable Temporal Activity instead. `builder` (the
-uncompiled StateGraph, registered with the plugin under the "devsecops" name
-— see GRAPH_NAME in temporal_worker.py/temporal_workflow.py, duplicated
-there rather than imported from here) and `graph` (compiled here for
-direct/non-Temporal use) both come from the same definition, so nothing here
-is Temporal-specific except the metadata itself. determine_agents/
-route_by_risk are conditional-edge routers, not nodes — Temporal requires
-those to run inline in the workflow and be async.
-
-NOTE: temporal_workflow.py deliberately does NOT import anything from this
-file. Temporal's sandboxed workflow runner validates a workflow module's
-entire import chain for determinism, and this module pulls in httpx (via
-agents/*) — which trips the sandbox's urllib.request restriction. Keep it
-that way; if this module needs sharing with the workflow, pass data through
-function arguments, not imports.
+`graph` (compiled below) is used directly by main.py's CLI path — plain
+LangGraph, no Temporal involved at all. determine_agents/synthesis_node/
+orchestrator_node/ACTIVITY are also imported by ci_graph.py, which builds
+its *own* separate StateGraph reusing these same node functions for the
+GitHub Actions path — that one does run through Temporal (see
+temporal_worker.py/ci_workflow.py), tagging its own nodes with the ACTIVITY
+metadata itself. determine_agents stays `async def` for that reason (ci_graph.py's
+Temporal-backed graph requires routers to run inline and be async) even
+though this file's own graph doesn't need it.
 """
 
 import json
@@ -136,15 +127,15 @@ def human_approval_node(state: DevSecOpsState) -> dict:
 
 
 builder = StateGraph(DevSecOpsState)
-builder.add_node("orchestrator", orchestrator_node, metadata=ACTIVITY)
-builder.add_node("terraform_agent", terraform_agent, metadata=ACTIVITY)
-builder.add_node("security_agent", security_agent, metadata=ACTIVITY)
-builder.add_node("pipeline_agent", pipeline_agent, metadata=ACTIVITY)
-builder.add_node("cost_agent", cost_agent, metadata=ACTIVITY)
-builder.add_node("generic_agent", generic_agent, metadata=ACTIVITY)
-builder.add_node("synthesis", synthesis_node, metadata=ACTIVITY)
-builder.add_node("auto_merge", auto_merge_node, metadata=ACTIVITY)
-builder.add_node("human_approval", human_approval_node, metadata=ACTIVITY)
+builder.add_node("orchestrator", orchestrator_node)
+builder.add_node("terraform_agent", terraform_agent)
+builder.add_node("security_agent", security_agent)
+builder.add_node("pipeline_agent", pipeline_agent)
+builder.add_node("cost_agent", cost_agent)
+builder.add_node("generic_agent", generic_agent)
+builder.add_node("synthesis", synthesis_node)
+builder.add_node("auto_merge", auto_merge_node)
+builder.add_node("human_approval", human_approval_node)
 
 builder.add_edge(START, "orchestrator")
 builder.add_conditional_edges("orchestrator", determine_agents)
