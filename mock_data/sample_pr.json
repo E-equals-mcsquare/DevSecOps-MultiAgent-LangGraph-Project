@@ -1,0 +1,10 @@
+{
+  "pr_title": "Add public S3 bucket + update CI pipeline",
+  "pr_number": 42,
+  "author": "souvik",
+  "changed_files": [
+    "infra/terraform/s3_bucket.tf",
+    "infra/terraform/iam_policy.tf",
+    ".github/workflows/deploy.yml"
+  ]
+}

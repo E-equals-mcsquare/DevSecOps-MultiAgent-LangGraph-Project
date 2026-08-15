@@ -1,0 +1,11 @@
+.venv
+.env
+.git
+__pycache__
+*.pyc
+.pytest_cache
+web
+main.py
+mock_data
+README.md
+.github

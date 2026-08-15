@@ -1,0 +1,39 @@
+name: DevSecOps PR Review
+
+# Triggers the durable Temporal Workflow (see ci_workflow.py / trigger_workflow.py)
+# that runs the CI DevSecOps LangGraph (ci_graph.py): agents run as Temporal
+# Activities, and the last one posts the review as a PR comment. Needs a
+# temporal_worker.py process already running against the same Temporal server
+# (see README.md "GitHub Actions PR trigger (CI path)") — this job only starts
+# the workflow and waits for it, it doesn't run any agent logic itself.
+#
+# Runs on a self-hosted runner registered on your own machine, not a
+# GitHub-hosted one — GitHub-hosted runners are ephemeral cloud VMs and can't
+# reach a Temporal server on your laptop at all. A self-hosted runner IS a
+# process on your machine, so trigger_workflow.py connects to Temporal the
+# same way temporal_worker.py does. No cloud, no credentials in GitHub at all
+# for this path — see README.md "Register a self-hosted runner".
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # full history so `git diff <base-sha> <head-sha>` in trigger_workflow.py
+          # can always resolve both sides, not just the shallow default.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Trigger DevSecOps review workflow
+        run: python3 trigger_workflow.py

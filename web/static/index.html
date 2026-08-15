@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agentic DevSecOps Review</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">◆</span>
+        <div>
+          <h1>Agentic DevSecOps Review</h1>
+          <p class="subtitle">LangGraph orchestrator · real MCP-backed agents · Claude synthesis</p>
+        </div>
+      </div>
+      <button id="run-btn" class="btn btn-primary">
+        <span class="btn-label">Run Review</span>
+        <span class="btn-spinner" hidden></span>
+      </button>
+    </header>
+
+    <main>
+      <section id="pr-card" class="card pr-card" hidden>
+        <div class="pr-card-head">
+          <span class="pr-number" id="pr-number"></span>
+          <h2 id="pr-title"></h2>
+        </div>
+        <p class="pr-author">opened by <span id="pr-author"></span></p>
+        <div class="chip-row" id="pr-files"></div>
+      </section>
+
+      <section class="pipeline">
+
+        <div class="stage" id="stage-orchestrator">
+          <div class="stage-marker"><span class="dot"></span><div class="stage-connector"></div></div>
+          <div class="stage-content">
+            <div class="stage-label">Orchestrator</div>
+            <div class="stage-body muted">Reads the PR and routes to relevant agents.</div>
+          </div>
+        </div>
+
+        <div class="stage" id="stage-agents">
+          <div class="stage-marker"><span class="dot"></span><div class="stage-connector"></div></div>
+          <div class="stage-content">
+            <div class="stage-label">Agents <span class="stage-hint">(run in parallel)</span></div>
+            <div class="agent-grid" id="agent-grid"></div>
+          </div>
+        </div>
+
+        <div class="stage" id="stage-synthesis">
+          <div class="stage-marker"><span class="dot"></span><div class="stage-connector"></div></div>
+          <div class="stage-content">
+            <div class="stage-label">Claude Synthesis</div>
+            <div class="stage-body muted" id="synthesis-placeholder">Waiting for agent findings…</div>
+            <div class="synthesis-card" id="synthesis-card" hidden>
+              <span class="risk-badge" id="risk-badge"></span>
+              <p class="root-cause" id="root-cause"></p>
+              <ul class="recommendations" id="recommendations"></ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage" id="stage-decision">
+          <div class="stage-marker"><span class="dot"></span></div>
+          <div class="stage-content">
+            <div class="stage-label">Decision</div>
+
+            <div class="approval-card" id="approval-card" hidden>
+              <p>⏸ <strong>Human approval required</strong> before merge.</p>
+              <div class="approval-actions">
+                <input id="decision-input" type="text" placeholder="approved-with-required-fixes" />
+                <button class="btn btn-approve" id="approve-btn">Approve</button>
+                <button class="btn btn-reject" id="reject-btn">Reject</button>
+              </div>
+            </div>
+
+            <div class="decision-banner" id="decision-banner" hidden></div>
+          </div>
+        </div>
+
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
