@@ -47,9 +47,10 @@ def terraform_agent(state) -> dict:
 
     summary = summarize_tool_output(
         "Terraform Agent",
-        "Summarize what infrastructure changes this Terraform plan makes (resources added/changed/"
-        "destroyed), and call out anything risky — public exposure, loosened permissions, destructive "
-        "changes. 3-5 sentences.",
+        "Factually summarize what infrastructure changes this Terraform plan makes: which resources "
+        "are added/changed/destroyed, and their key configuration (names, types, notable attributes). "
+        "Purely descriptive — no risk assessment, severity ratings, or merge/block recommendations; "
+        "that's Security Agent's job, not yours. 3-5 sentences.",
         plan.stdout,
     )
     return {"agent_results": [summary]}
