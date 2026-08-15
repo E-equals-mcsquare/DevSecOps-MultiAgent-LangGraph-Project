@@ -12,3 +12,4 @@ resource "aws_s3_bucket_public_access_block" "public_bucket" {
 }
 
 # demo: trigger the Agentic AI DevSecOps CI review pipeline
+# re-run: confirm terraform/snyk/pipeline/cost all succeed after fixes
