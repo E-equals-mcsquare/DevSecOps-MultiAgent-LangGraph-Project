@@ -13,6 +13,11 @@ name: DevSecOps PR Review
 # process on your machine, so trigger_workflow.py connects to Temporal the
 # same way temporal_worker.py does. No cloud, no credentials in GitHub at all
 # for this path — see README.md "Register a self-hosted runner".
+#
+# Deliberately skips actions/setup-python: its installer hardcodes
+# /Users/runner (the GitHub-hosted macOS runner's home dir) when creating the
+# tool cache, which 403s on a real self-hosted runner user. A self-hosted
+# runner already has Python on the machine anyway — nothing to download.
 
 on:
   pull_request:
@@ -28,12 +33,8 @@ jobs:
           # can always resolve both sides, not just the shallow default.
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python3 -m pip install -r requirements.txt
 
       - name: Trigger DevSecOps review workflow
         run: python3 trigger_workflow.py
