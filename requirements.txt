@@ -2,6 +2,7 @@ langgraph>=1.2
 langchain-anthropic>=0.3
 anthropic>=0.40
 python-dotenv>=1.0
+httpx[socks]>=0.27
 langchain-mcp-adapters>=0.3
 mcp>=1.0
 fastapi>=0.115

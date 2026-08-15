@@ -56,18 +56,37 @@ human at a browser — see "GitHub Actions PR trigger (CI path)" below.
 
 ## MCP integrations
 
-Three agents call real, official MCP servers instead of hitting APIs/CLIs directly.
+Four agents call real, official MCP servers instead of hitting APIs/CLIs directly.
 `pipeline_agent`/`post_summary_node` (see below) are the only ones that are genuinely
-*remotely hosted* by their provider — `cost_agent`'s MCP server still runs as a local
-subprocess (`uvx`) even though it's calling a real AWS API.
+*remotely hosted* by their provider — `terraform_agent`'s and `cost_agent`'s MCP
+servers both run as local subprocesses (Docker, `uvx`) even though they're calling
+real remote APIs.
 
 | Agent | MCP server | Requires |
 |---|---|---|
+| `terraform_agent` | [hashicorp/terraform-mcp-server](https://github.com/hashicorp/terraform-mcp-server) (Docker, stdio) — `create_run`/`get_run_details` against an HCP Terraform workspace | `TFE_TOKEN`, `TFE_ORG`, `TFE_WORKSPACE` in `.env`; Docker running locally |
 | `pipeline_agent` | GitHub's official **remote** MCP server at `api.githubcopilot.com/mcp/` — `actions_list` (`list_workflow_runs`) | `GITHUB_TOKEN` (PAT, `repo` scope) and `GITHUB_REPO` in `.env` |
 | `post_summary_node` (`agents/summary_agent.py`) | Same GitHub remote MCP server — `add_issue_comment` | Same as above |
 | `cost_agent` | AWS Labs' [Billing and Cost Management MCP server](https://awslabs.github.io/mcp/servers/billing-cost-management-mcp-server) (`uvx awslabs.billing-cost-management-mcp-server`, local stdio subprocess) — `cost-explorer` (`getCostAndUsage`) + `cost-optimization` (`list_recommendations`) | Real AWS credentials (`~/.aws` or `AWS_PROFILE`/`AWS_ACCESS_KEY_ID`); `uv`/`uvx` installed |
 
 Notes:
+- The Terraform MCP server has no tool to upload a configuration version, so
+  `terraform_agent` pushes `infra/terraform/*.tf` to the workspace via the HCP Terraform
+  REST API directly before calling `create_run` — everything after that (triggering the
+  run, polling status, pulling the plan log) goes through MCP. `create_run` uses
+  `run_type: "plan_only"` — it never applies.
+- `terraform_agent` (like `security_agent` below) pipes the plan log through Claude
+  (`agents/llm_utils.py`'s `summarize_tool_output()`) rather than dumping it raw —
+  same "purely descriptive, no risk verdicts" scope either way (local CLI or MCP), so
+  switching between them doesn't change what the summary looks like, only where the
+  plan data comes from.
+- **`terraform_agent` needs Docker running on whatever host runs `temporal_worker.py`
+  as a plain process.** If you instead run the worker *inside* its own container (see
+  "Hosting the worker in Docker" below), that's Docker-in-Docker — `docker run` inside
+  a container needs the host's Docker socket mounted in (`-v
+  /var/run/docker.sock:/var/run/docker.sock`), which isn't done by default here. Leave
+  `TFE_TOKEN`/`TFE_ORG`/`TFE_WORKSPACE` unset to skip MCP and fall back to local
+  `terraform plan` instead — no Docker needed at all in that mode.
 - GitHub's remote MCP server only enables a default toolset (repos, issues, pull
   requests, ...) — Actions tools aren't in it. `pipeline_agent` requests them via the
   `X-MCP-Toolsets: actions` header.
@@ -83,34 +102,33 @@ Notes:
 - `cost_agent` runs alongside `terraform_agent` (routed on `.tf` changes) since cost
   impact is naturally tied to infra changes.
 
-## Local-only agents (no MCP)
+## Local-only agent (no MCP)
 
-`terraform_agent` and `security_agent` deliberately don't use MCP at all — both
-originally called a Docker- or npx-spawned MCP server (HashiCorp's Terraform MCP
-server, Snyk's MCP server), which meant anywhere you host `temporal_worker.py` needs
-Docker/Node available. That's real hosting friction this project doesn't need, so
-both were simplified to a single local-CLI path — real tools, real findings, no MCP
-protocol layer, no subprocess-spawned server:
+`security_agent` deliberately doesn't use MCP at all — it originally called an
+npx-spawned MCP server (Snyk's), which meant anywhere you host `temporal_worker.py`
+needs Node available. That's real hosting friction this project doesn't need, so it
+was simplified to a single local-CLI path — real tool, real findings, no MCP protocol
+layer, no subprocess-spawned server:
 
 | Agent | Tool | Requires |
 |---|---|---|
-| `terraform_agent` | `terraform init/validate/plan` (subprocess) against `infra/terraform/` | `terraform` CLI on `PATH` |
 | `security_agent` | `snyk iac test --json` (subprocess, standalone binary — see install below) against `infra/terraform/` | `SNYK_TOKEN` in `.env`; `snyk` CLI on `PATH` |
 
-Neither is a "dumb" CLI wrapper, though: both pipe their raw tool output through
-Claude (`agents/llm_utils.py`'s `summarize_tool_output()`, same `ChatAnthropic` model
-`synthesis_node` uses) to turn a mechanical plan diff / issues list into an actual
-risk narrative — genuinely a small agent, not just a subprocess call.
+Not a "dumb" CLI wrapper, though: it pipes raw tool output through Claude
+(`agents/llm_utils.py`'s `summarize_tool_output()`, same `ChatAnthropic` model
+`synthesis_node` uses) to turn a mechanical issues list into an actual risk narrative
+— genuinely a small agent, not just a subprocess call. `terraform_agent` uses the same
+helper for its own summarization (see "MCP integrations" above), whichever of its two
+paths (MCP or local) produced the plan.
 
-**Installing the Snyk CLI** (no Node/npm — it's a standalone binary, and with it gone
-this project has no Node.js dependency anywhere):
+**Installing the Snyk CLI** (no Node/npm — it's a standalone binary):
 ```bash
 curl -Lo /usr/local/bin/snyk https://downloads.snyk.io/cli/latest/snyk-linux   # or snyk-macos-arm64, etc.
 chmod +x /usr/local/bin/snyk
 ```
-Bake that into whatever image/host runs `temporal_worker.py` (same place `terraform`
-needs to live) — GitHub Actions runners never need it, since `security_agent` runs as
-a Temporal Activity inside the worker process, not inside `trigger_workflow.py`'s job.
+Bake that into whatever image/host runs `temporal_worker.py` — GitHub Actions runners
+never need it, since `security_agent` runs as a Temporal Activity inside the worker
+process, not inside `trigger_workflow.py`'s job.
 
 Notes:
 - `snyk iac test` scans locally — rule evaluation happens in the CLI itself, your
@@ -123,21 +141,30 @@ Notes:
 - No fallback if `SNYK_TOKEN`/`snyk` are missing — `security_agent` reports that
   plainly and skips the scan, rather than silently swapping in a different tool
   (which would make demo output inconsistent run to run).
-- Both functions still take `state` as their LangGraph node signature but don't use
-  it — they always scan the same `infra/terraform/` directory rather than a
-  PR-specific diff (a real version would `git diff` the PR's `.tf` files into a temp
-  dir first).
-- Want the real HCP Terraform runs back (not just local `terraform plan`) without
-  MCP? `agents/terraform_agent.py` used to call HCP's REST API directly via `httpx`
-  for config-version upload — the same pattern extends to `create_run`/
-  `get_run_details`.
+- Both `terraform_agent` and `security_agent` still take `state` as their LangGraph
+  node signature but don't use it — they always scan the same `infra/terraform/`
+  directory rather than a PR-specific diff (a real version would `git diff` the PR's
+  `.tf` files into a temp dir first).
+- `terraform_agent` and `security_agent` intentionally have different scopes now:
+  `terraform_agent` only describes what a plan changes (resources, config) —
+  no risk assessment, severity ratings, or merge/block verdicts. All of that is
+  `security_agent`'s job, so the same finding isn't independently (and sometimes
+  inconsistently) re-judged by two agents.
 
 ## Hosting the worker in Docker
 
 `temporal_worker.py` (not the CLI or web UI — see `.dockerignore`) runs from a
 single-purpose image: Python 3.13-slim + `terraform`, `snyk` (standalone binary,
-no Node/npm), and `uvx` baked in — the exact three tools "Local-only agents" and
-`cost_agent`'s MCP integration need, nothing else.
+no Node/npm), and `uvx` baked in — everything `terraform_agent`'s *local* fallback,
+`security_agent`, and `cost_agent`'s MCP integration need.
+
+**Not included: Docker-in-Docker for `terraform_agent`'s MCP path.** If
+`TFE_TOKEN`/`TFE_ORG`/`TFE_WORKSPACE` are set, `terraform_agent` shells out to
+`docker run hashicorp/terraform-mcp-server` — which doesn't work from inside this
+image as-is, since there's no Docker daemon in it. Either leave those three env vars
+unset (falls back to local `terraform plan`, no Docker needed at all) or mount the
+host's Docker socket in at `docker run` time (`-v /var/run/docker.sock:/var/run/docker.sock`)
+if you want the MCP path working from inside the container too.
 
 ```bash
 make docker-build   # or: docker build -t agentic-devsecops-worker .
