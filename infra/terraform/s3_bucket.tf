@@ -10,3 +10,5 @@ resource "aws_s3_bucket_public_access_block" "public_bucket" {
   ignore_public_acls      = false
   restrict_public_buckets = false
 }
+
+# live demo recording: PR -> GHAC (self-hosted runner) -> Temporal -> LangGraph -> agents
