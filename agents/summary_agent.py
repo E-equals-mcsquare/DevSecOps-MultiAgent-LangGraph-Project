@@ -41,12 +41,19 @@ async def _post_comment(owner: str, repo: str, pr_number: int, token: str, body:
         }
     })
     tools = {t.name: t for t in await client.get_tools()}
-    await tools["add_issue_comment"].ainvoke({
+    result = await tools["add_issue_comment"].ainvoke({
         "owner": owner,
         "repo": repo,
         "issue_number": pr_number,
         "body": body,
     })
+    # GitHub's MCP server relays upstream API errors (bad/under-scoped token,
+    # repo not found, etc.) as normal tool-result text rather than an MCP
+    # protocol-level error — a call can "succeed" here while actually having
+    # posted nothing. Catch that instead of silently reporting success.
+    text = result[0]["text"] if isinstance(result, list) and result else str(result)
+    if any(marker in text for marker in ("Not Found", "not accessible", '"status": "403"', '"status": "404"')):
+        raise RuntimeError(f"GitHub MCP add_issue_comment returned an error: {text[:300]}")
 
 
 def post_summary_node(state) -> dict:
